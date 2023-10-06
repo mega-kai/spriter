@@ -9,6 +9,12 @@ pub(crate) struct Region(u32, u32);
 
 pub struct Key(Region, usize);
 
+impl Key {
+    pub(crate) fn copy_internal(&self) -> Self {
+        Self(self.0, self.1)
+    }
+}
+
 fn insert<T>(vec: &mut Vec<Option<T>>, value: T) -> usize {
     let mut already_has_none = false;
     let mut index: usize = !0;
