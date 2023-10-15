@@ -1,19 +1,24 @@
 #![allow(unused_variables, unused_imports, dead_code, unused_mut)]
 #![feature(portable_simd)]
+mod animation;
 mod quadtree;
+use animation::*;
+use arrayvec::ArrayString;
+use quadtree::*;
+use std::collections::HashMap;
+use std::ops::{Index, IndexMut};
+use std::time::Duration;
+use std::time::Instant;
 use std::{
     f32::consts::PI,
     ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign},
 };
-
-use quadtree::*;
+use wasm_bindgen::prelude::wasm_bindgen;
 
 // todo, ok but what about a simulation game just like simtower/project highrise but with trains
 // you can design trains and attach them onto each other, each carriage is a module, maybe one can act
 // as a transformer that turns DC to AC, where the DC power come from another carriage, probably nuclear
 // or something... sleeper ones, seat ones and other kinds, dining area, water spa train, shop train
-
-// todo frame animation
 
 // todo, render to texture
 
@@ -58,7 +63,7 @@ impl Origin {
         }
     }
 
-    fn new_empty() -> Self {
+    fn zero() -> Self {
         Self {
             vector2d: Vector2d { x: 0.0, y: 0.0 },
         }
@@ -125,52 +130,34 @@ impl Neg for Vector2d {
 // there's only one copy of Sprite, once it's gone all the sprites are gone
 struct Sprite {
     // but now we use quadtree to store both rect and texture how do we remotely handle this??
-    data: *mut Scene,
+    scene: *mut Scene,
     key_top_left: Option<Key>,
     key_bottom_right: Option<Key>,
     origin: Origin,
 }
 impl Sprite {
-    fn read_rect<'a, 'b>(&'a self) -> &'b Rect {
+    fn read_data<'a, 'b>(&'a self) -> &'b SpriteData {
         unsafe {
-            match &(*self.data).part_map[self.key_top_left.as_ref().unwrap()] {
-                SpriteDataPoint::TopLeft(data) => &data.rect,
+            match &(*self.scene).part_map[self.key_top_left.as_ref().unwrap()] {
+                SpriteDataPoint::TopLeft(data) => data,
                 SpriteDataPoint::BottomRight => panic!("shouldn't be br point"),
             }
         }
     }
 
-    fn read_tex<'a, 'b>(&'a self) -> &'b Texture {
+    fn read_data_mut<'a, 'b>(&'a mut self) -> &'b mut SpriteData {
         unsafe {
-            match &(*self.data).part_map[self.key_top_left.as_ref().unwrap()] {
-                SpriteDataPoint::TopLeft(data) => &data.texture,
-                SpriteDataPoint::BottomRight => panic!("shouldn't be br point"),
-            }
-        }
-    }
-
-    fn read_rect_mut<'a, 'b>(&'a mut self) -> &'b mut Rect {
-        unsafe {
-            match &mut (*self.data).part_map[self.key_top_left.as_ref().unwrap()] {
-                SpriteDataPoint::TopLeft(data) => &mut data.rect,
-                SpriteDataPoint::BottomRight => panic!("shouldn't be br point"),
-            }
-        }
-    }
-
-    fn read_tex_mut<'a, 'b>(&'a mut self) -> &'b mut Texture {
-        unsafe {
-            match &mut (*self.data).part_map[self.key_top_left.as_ref().unwrap()] {
-                SpriteDataPoint::TopLeft(data) => &mut data.texture,
+            match &mut (*self.scene).part_map[self.key_top_left.as_ref().unwrap()] {
+                SpriteDataPoint::TopLeft(data) => data,
                 SpriteDataPoint::BottomRight => panic!("shouldn't be br point"),
             }
         }
     }
 
     fn update_keys(&mut self) {
-        let bound_rect = self.read_rect().get_bounding_rect();
+        let bound_rect = self.read_data().rect.get_bounding_rect();
         self.key_top_left = Some(unsafe {
-            (*self.data)
+            (*self.scene)
                 .part_map
                 .move_point(
                     self.key_top_left.as_ref().unwrap().copy_internal(),
@@ -179,7 +166,7 @@ impl Sprite {
                 .unwrap()
         });
         self.key_bottom_right = Some(unsafe {
-            (*self.data)
+            (*self.scene)
                 .part_map
                 .move_point(
                     self.key_bottom_right.as_ref().unwrap().copy_internal(),
@@ -189,6 +176,15 @@ impl Sprite {
         });
     }
 
+    // will reset rect size to size of texture
+    fn reset_size(&mut self) {
+        todo!()
+    }
+
+    fn reset_origin(&mut self) {
+        self.origin = Origin::zero();
+    }
+
     // relative to 0,0 which is the top left of the sprite rect
     fn set_origin(&mut self, offset_x: f32, offset_y: f32) {
         self.origin.set(offset_x, offset_y);
@@ -196,16 +192,16 @@ impl Sprite {
 
     // of origin
     fn get_pos_origin_global(&self) -> Vector2d {
-        self.read_rect().top_left() + self.origin.vector2d
+        self.read_data().rect.top_left() + self.origin.vector2d
     }
 
     fn get_pos_top_left(&self) -> Vector2d {
-        self.read_rect().top_left()
+        self.read_data().rect.top_left()
     }
 
     // ok but how does ui layer /
     fn set_layer(&mut self, layer: u8, is_ui: bool) {
-        let rect = self.read_rect_mut();
+        let rect = &mut self.read_data_mut().rect;
         if is_ui {
             rect.set_depth(layer as f32)
         } else {
@@ -220,38 +216,57 @@ impl Sprite {
     }
 
     fn offset_pos(&mut self, vector: Vector2d) {
-        self.read_rect_mut().offset_pos(vector);
+        self.read_data_mut().rect.offset_pos(vector);
         self.update_keys();
     }
 
     fn set_size(&mut self, width: f32, height: f32) {
-        let x_scale = width / self.read_rect().width();
-        let y_scale = height / self.read_rect().height();
+        let x_scale = width / self.read_data().rect.width();
+        let y_scale = height / self.read_data().rect.height();
         self.set_scale(x_scale, y_scale);
     }
 
     fn set_scale(&mut self, x_scale: f32, y_scale: f32) {
-        self.origin = self
-            .read_rect_mut()
-            .set_scale_with_origin(x_scale, y_scale, self.origin);
+        self.origin =
+            self.read_data_mut()
+                .rect
+                .set_scale_with_origin(x_scale, y_scale, self.origin);
         self.update_keys();
     }
 
     // totally gonna be careful here, need to get a bounding box whose lines are parallel to axis
     fn set_rotation(&mut self, rad: f32) {
         self.origin = self
-            .read_rect_mut()
+            .read_data_mut()
+            .rect
             .set_rotation_with_origin(rad, self.origin);
         self.update_keys();
     }
 
-    fn set_tex(&mut self, tex: &str) {
+    fn set_frame(&mut self, tex: &str) -> Result<(), &'static str> {
         self.disable_float_stencil();
-        todo!()
+        // note that this only uses the texture and not the default size
+        unsafe {
+            let (frame, _) = (*self.scene).tex_atlas.get(tex)?;
+            self.read_data_mut().frame = frame;
+        }
+        Ok(())
     }
 
     // only would have an effect if it's an animated texture, that is, a slice of frames with len longer than one
-    fn start_playing(&mut self) {
+    fn play(&mut self, seq: &str) -> Result<(), &'static str> {
+        // flush the animation index regardless
+        unsafe {
+            let anim_index = (*self.scene).anim_seq.add(seq)?;
+        }
+        todo!()
+    }
+
+    fn pause(&mut self) {
+        todo!()
+    }
+
+    fn end(&mut self) {
         todo!()
     }
 
@@ -270,7 +285,9 @@ impl Sprite {
 
     // some kinda special clipping sprite that many sprites can be under???
     // either this or entire opaque layer
-    fn set_clipping_rect() {}
+    fn set_clipping_rect() {
+        todo!()
+    }
 
     fn remove(self) {
         drop(self)
@@ -279,42 +296,12 @@ impl Sprite {
 impl Drop for Sprite {
     fn drop(&mut self) {
         unsafe {
-            (*self.data)
+            (*self.scene)
                 .remove_sprite_raw(
                     self.key_top_left.as_ref().unwrap().copy_internal(),
                     self.key_bottom_right.as_ref().unwrap().copy_internal(),
                 )
                 .unwrap();
-        }
-    }
-}
-
-/// this is for saving only
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct Tex {
-    top_left: (u32, u32),
-    bottom_right: (u32, u32),
-}
-impl Tex {
-    fn to_tex(self, width: u32, height: u32) -> Texture {
-        Texture {
-            top_left: (
-                self.top_left.0 as f32 / width as f32,
-                self.top_left.1 as f32 / height as f32,
-            ),
-            bottom_left: (
-                self.top_left.0 as f32 / width as f32,
-                self.bottom_right.1 as f32 / height as f32,
-            ),
-            bottom_right: (
-                self.bottom_right.0 as f32 / width as f32,
-                self.bottom_right.1 as f32 / height as f32,
-            ),
-            top_right: (
-                self.bottom_right.0 as f32 / width as f32,
-                self.top_left.1 as f32 / height as f32,
-            ),
         }
     }
 }
@@ -364,6 +351,11 @@ impl Rect {
     fn offset_pos(&mut self, mut vector: Vector2d) {
         vector += self.top_left();
         self.set_pos_top_left(vector.x, vector.y);
+    }
+
+    // offset by the size of self
+    fn offset_granular(&mut self, offset_x: i32, offset_y: i32) {
+        todo!()
     }
 
     fn set_pos_with_origin(&mut self, origin: Origin, origin_x: f32, origin_y: f32) {
@@ -541,25 +533,6 @@ impl Rect {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-struct Texture {
-    top_left: (f32, f32),
-    bottom_left: (f32, f32),
-    bottom_right: (f32, f32),
-    top_right: (f32, f32),
-}
-impl Texture {
-    fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        todo!()
-    }
-
-    // the width/height is normalized version
-    fn set_tex_raw(&mut self, x: f32, y: f32, width: f32, height: f32) {
-        todo!()
-    }
-}
-
 #[cfg_attr(target_family = "wasm", wasm_bindgen)]
 struct WasmVertAttribPtr {
     sprite_pos: *const u8,
@@ -581,30 +554,6 @@ impl WasmVertAttribPtr {
             index: render_data.index.as_ptr() as _,
             index_len: render_data.sprite_pos.len() as u32 * 6,
         }
-    }
-}
-
-struct TextureMap {
-    map: HashMap<String, Texture>,
-    size: (u32, u32),
-}
-impl TextureMap {
-    fn new(width: u32, height: u32) -> Self {
-        todo!()
-    }
-
-    fn load_texture_map(
-        &mut self,
-        map: HashMap<String, Tex>,
-        width: u32,
-        height: u32,
-    ) -> Result<(), &'static str> {
-        todo!()
-    }
-
-    // return a default sized rect
-    fn get(&self, texture: &str) -> Result<(Texture, Rect), &'static str> {
-        todo!()
     }
 }
 
@@ -635,7 +584,8 @@ impl Camera {
 
 struct SpriteData {
     rect: Rect,
-    texture: Texture,
+    frame: Frame,
+    anim_key: Option<AnimationIndex>,
 }
 
 enum SpriteDataPoint {
@@ -643,33 +593,12 @@ enum SpriteDataPoint {
     BottomRight,
 }
 
-impl PartitionMap<SpriteDataPoint> {
-    pub(crate) fn query_n_load(
-        &mut self,
-        top_left: Vector2d,
-        bottom_right: Vector2d,
-        attrib: &mut RenderData,
-    ) -> Result<(), &'static str> {
-        let regions = self.points_to_regions(top_left, bottom_right)?;
-        for reg in regions {
-            let vec = self.raw_map.get(&reg).unwrap();
-            for each in vec {
-                if each.is_some() {
-                    match each.as_ref().unwrap() {
-                        SpriteDataPoint::TopLeft(data) => attrib.load(data),
-                        SpriteDataPoint::BottomRight => {}
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 struct RenderData {
-    sprite_pos: Vec<Rect>,
-    tex_pos: Vec<Texture>,
+    // index buffer
     index: Vec<u16>,
+    // vert attributes, since each vert has diff pos/uv so it's best to use vert attrib
+    sprite_pos: Vec<Rect>,
+    tex_pos: Vec<Frame>,
 }
 
 impl RenderData {
@@ -681,9 +610,10 @@ impl RenderData {
         }
     }
 
-    fn load(&mut self, sprite: &SpriteData) {
+    fn load(&mut self, sprite: &SpriteData, offset: FrameVector2d) {
         self.sprite_pos.push(sprite.rect);
-        self.tex_pos.push(sprite.texture);
+
+        self.tex_pos.push(sprite.frame + offset);
     }
 
     fn ensure_index_len(&mut self, size: usize) {
@@ -715,25 +645,31 @@ impl RenderData {
 struct Scene {
     vert_attrib: RenderData,
     part_map: PartitionMap<SpriteDataPoint>,
-    tex_map: TextureMap,
+    tex_atlas: TextureAtlas,
+    anim_seq: SeqTable,
 }
 
 impl Scene {
-    fn new_empty(size: u32, depth: u32, texture_map: TextureMap) -> Self {
+    fn new_empty(size: u32, depth: u32, texture_map: TextureAtlas) -> Self {
         Self {
             // this really feels like UB but it's not?????
-            tex_map: texture_map,
+            tex_atlas: texture_map,
             vert_attrib: RenderData::new(),
             part_map: PartitionMap::new(size, depth),
+            anim_seq: SeqTable::new(),
         }
     }
 
     // ok but how does the coord system works
     fn add_sprite(&mut self, pos: Vector2d, texture: &str) -> Result<Sprite, &'static str> {
-        let (tex, mut rect) = self.tex_map.get(texture)?;
+        let (tex, mut rect) = self.tex_atlas.get(texture)?;
         rect.set_pos_top_left(pos.x, pos.y);
 
-        let tl_data = SpriteDataPoint::TopLeft(SpriteData { rect, texture: tex });
+        let tl_data = SpriteDataPoint::TopLeft(SpriteData {
+            rect,
+            frame: tex,
+            anim_key: None,
+        });
         let br_data = SpriteDataPoint::BottomRight;
 
         // basically after inserting this point the pos data is lost since it's griddified already
@@ -742,10 +678,10 @@ impl Scene {
 
         // you don't need to get bounding box since there's no rotation going on here
         let sprite = Sprite {
-            data: self,
+            scene: self,
             key_top_left: Some(tl_key),
             key_bottom_right: Some(br_key),
-            origin: Origin::new_empty(),
+            origin: Origin::zero(),
         };
         Ok(sprite)
     }
@@ -760,17 +696,34 @@ impl Scene {
         Ok(())
     }
 
-    fn update(&mut self, cam: &Camera) -> WasmVertAttribPtr {
+    fn update(&mut self, cam: &Camera, delta_t: f32) -> WasmVertAttribPtr {
+        // todo, do cam matrix mult
+        self.anim_seq.update(delta_t);
+
         self.vert_attrib.clear();
 
-        self.part_map
-            .query_n_load(
-                cam.rect.top_left(),
-                cam.rect.bottom_right(),
-                &mut self.vert_attrib,
-            )
+        // cam occlusion
+        let regions = self
+            .part_map
+            .points_to_regions(cam.rect.top_left(), cam.rect.bottom_right())
             .unwrap();
+        for reg in regions {
+            let vec = self.part_map.raw_map.get(&reg).unwrap();
+            for each in vec {
+                if each.is_some() {
+                    match each.as_ref().unwrap() {
+                        // todo, fix this with real frame vec
+                        // todo, maybe simd the loading??
+                        SpriteDataPoint::TopLeft(data) => {
+                            self.vert_attrib.load(data, FrameVector2d::Zero)
+                        }
+                        SpriteDataPoint::BottomRight => {}
+                    }
+                }
+            }
+        }
 
+        // finish
         self.vert_attrib
             .ensure_index_len(self.vert_attrib.sprite_pos.len());
 
@@ -779,6 +732,7 @@ impl Scene {
 
     // ui and world can each only have one layer with ysort enabled
     fn enable_ysort(&mut self, layer: u8, is_ui: bool) -> Result<(), &'static str> {
+        // todo, extra uniform data
         todo!()
     }
 

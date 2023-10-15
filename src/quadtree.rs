@@ -1,7 +1,6 @@
 use crate::*;
-pub(crate) use std::collections::HashMap;
-use std::ops::{Index, IndexMut};
-pub(crate) use wasm_bindgen::prelude::wasm_bindgen;
+
+// todo, general simd support??
 
 // literally the coords
 #[derive(Hash, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -10,6 +9,7 @@ pub(crate) struct Region(u32, u32);
 pub struct Key(Region, usize);
 
 impl Key {
+    /// should only be used within crate
     pub(crate) fn copy_internal(&self) -> Self {
         Self(self.0, self.1)
     }
